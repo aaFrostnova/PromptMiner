@@ -81,7 +81,7 @@ class PromptGenerationEnv(gym.Env):
 
         # 对于非终止状态，奖励为0
         reward = 0.0
-        
+        clip_similarity = 0.0
         # 仅在 episode 结束时计算最终奖励
         if done:
             prompt_text = self.processor.tokenizer.decode(self.prompt, skip_special_tokens=True)
@@ -90,7 +90,7 @@ class PromptGenerationEnv(gym.Env):
                 # --- 1. 生成图片并计算原始 CLIP 相似度 ---
                 generator = torch.Generator(device=device).manual_seed(0)
                 if "sdxl" in self.diffusion_model_name:
-                    generated_image = self.diffusion_model(prompt_text, num_inference_steps=1, guidance_scale=0.0).images[0]
+                    generated_image = self.diffusion_model(prompt_text, num_inference_steps=1, guidance_scale=0.0, generator=generator).images[0]
                 else:
                     generated_image = self.diffusion_model(prompt_text, generator=generator).images[0]
                 generated_inputs = self.clip_processor(images=generated_image, return_tensors="pt").to(device)
@@ -129,7 +129,7 @@ class PromptGenerationEnv(gym.Env):
             "target_image": self.target_image
         }
         
-        return state, reward, done, {}
+        return state, reward, done, {}, clip_similarity
 
 # Rollout Buffer (No changes needed)
 class RolloutBuffer:
@@ -345,7 +345,7 @@ def main():
         done = False
         while not done:
             action = ppo.select_action(state)
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward, done, _, _ = env.step(action)
             
             ppo.buffer.rewards.append(reward)
             ppo.buffer.is_terminals.append(done)
