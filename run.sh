@@ -13,17 +13,17 @@
 
 # Path to your image generation model (e.g., Stable Diffusion)
 TARGET_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/sdxl-turbo"
-RECORD_DIR="/home/mingzhel_umass_edu/Modifier_fuzz/logs_structured_mcts_fuzzer_sdxl_mscoco"
+RECORD_DIR="/home/mingzhel_umass_edu/Modifier_fuzz/logs_structured_mcts_fuzzer_sdxl_lexica_baseonly"
 # Path to your VL-Model for local mutations (e.g., Qwen-VL)
 # This is used if you are NOT using GPT-4o for mutations.
-# IMAGE_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/Qwen2-VL-2B-Instruct"
 IMAGE_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/Qwen2-VL-2B-Instruct"
+# IMAGE_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/Qwen2.5-VL-3B-Instruct"
+# IMAGE_MODEL_PATH="gpt-4o"
 # Your OpenAI API Key (leave empty if using only local models)
+WORK_DIR="/home/mingzhel_umass_edu/Modifier_fuzz/base_prompt_results_sdxl_lexica"
 OPENAI_API_KEY="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"
-WORK_DIR="./results_sdxl_mscoco"
 mkdir -p $WORK_DIR
 CUDA_ID=0
-SEED=0
 
 # --- Script Logic ---
 
@@ -39,7 +39,11 @@ echo "======================================================="
 
 # 2. Loop through all image files in the directory
 for image_path in "$IMAGE_DIR"/*.png "$IMAGE_DIR"/*.jpg "$IMAGE_DIR"/*.jpeg; do
-
+    # count=$((count+1))
+    # if [ $count -lt 4 ]; then
+    #     continue
+    # fi
+    echo "Processing: $image_path"
     # 3. Define variables for the current image
     image_filename=$(basename "$image_path")
 
@@ -68,10 +72,10 @@ for image_path in "$IMAGE_DIR"/*.png "$IMAGE_DIR"/*.jpg "$IMAGE_DIR"/*.jpeg; do
     # --- 4. Run Training ---
     echo "[TRAINING] Starting RL training for $image_filename..."
 
-    python train_imm_blip.py \
-       --image_dir "$image_path" \
-       --work_dir "$WORK_DIR" \
-       --target_model_path "$TARGET_MODEL_PATH"
+    # python train_imm_blip.py \
+    #     --image_dir "$image_path" \
+    #     --work_dir "$WORK_DIR" \
+    #     --target_model_path "$TARGET_MODEL_PATH"
 
 
 
@@ -88,6 +92,8 @@ for image_path in "$IMAGE_DIR"/*.png "$IMAGE_DIR"/*.jpg "$IMAGE_DIR"/*.jpeg; do
         --openai_key "$OPENAI_API_KEY" \
         --work_dir "$WORK_DIR" \
         --record_dir "$RECORD_DIR" 
+
+        
 
     echo "[FUZZ] Evaluation finished for $image_filename."
 
