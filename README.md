@@ -44,4 +44,24 @@ WORK_DIR="./results_sdxl_mscoco"
 # run the script
 bash run.sh
 ```
+## evaluation
 
+modifty the path in eval.py 
+
+```python
+# set the paths in run.sh
+# this path is where you store all the txt files with generated prompts(000.txt, 001.txt), and one prompt per line
+RESULTS_DIR = Path("/home/mingzhel_umass_edu/Modifier_fuzz/results_sdxl_txt_mscoco_5000pre_lexica_baseonly")
+# this path is where you store the lexica dataset, you should have prompts.json and images(000.png, 001.png) in this folder
+LEXICA_DIR = Path("/home/mingzhel_umass_edu/inverse/LatentTracer/data/lexica")
+# this is where the final results will be saved
+RESULT_FILE = RESULTS_DIR / "result.json"
+# this is the path to the prompts.json file in the lexica dataset(datasets can be changed to other datasets as well)
+PROMPTS_FILE = LEXICA_DIR / "prompts.json"
+# modify this path to your model path
+MODEL_ID = "/project/pi_shiqingma_umass_edu/mingzheli/model/sdxl-turbo"
+```
+and then run it
+```bash
+python eval.py
+```
