@@ -11,7 +11,7 @@ from PIL import Image
 from torchvision import transforms
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from diffusers import AutoPipelineForText2Image
-
+from sentence_transformers import SentenceTransformer, util
 # this path is where you store all the txt files with generated prompts(000.txt, 001.txt), and one prompt per line
 RESULTS_DIR = Path("/home/mingzhel_umass_edu/Modifier_fuzz/results_sdxl_txt_mscoco_5000pre_lexica_baseonly")
 # this path is where you store the lexica dataset, you should have prompts.json and images(000.png, 001.png) in this folder
@@ -27,7 +27,7 @@ CACHE_DIR = "/project/pi_shiqingma_umass_edu/mingzheli/.cache"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
+sbert_model = SentenceTransformer("/project/pi_shiqingma_umass_edu/mingzheli/model/all-mpnet-base-v2", device=DEVICE)
 # ===== 图像变换 =====
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
@@ -110,6 +110,7 @@ def get_best_text(image_path, prompts, seed=0):
             ).images
 
             eval_loss_clip = calculate_clip_similarity(orig_image, pred_imgs[0])
+            eval_loss_clip = {1 + eval_loss_clip} / 2  # 归一化到 [0, 1]
 
             orig_tensor = transform(orig_image).unsqueeze(0) * 2 - 1
             pred_tensor = transform(pred_imgs[0]).unsqueeze(0) * 2 - 1
@@ -148,13 +149,16 @@ def main():
         image_path = LEXICA_DIR / f"{image_name}.png"
 
         best_loss_clip, best_loss_lpips, best_text = get_best_text(image_path, results)
-
         P, R, F1 = bert_score.score(
             [best_text],
             [meta_data[f"{image_name}.png"]],
             lang="en",
             verbose=False
         )
+        ref_text = meta_data[f"{image_name}.png"]
+        emb_best = sbert_model.encode([best_text], convert_to_tensor=True)
+        emb_ref = sbert_model.encode([ref_text], convert_to_tensor=True)
+        sbert_score = util.cos_sim(emb_best, emb_ref).item()
 
         ppl_score = ppl(best_text)
 
@@ -165,6 +169,7 @@ def main():
             "P": P.item(),
             "R": R.item(),
             "F1": F1.item(),
+            "sbert": sbert_score,
             "ppl": ppl_score.item()
         }
 
