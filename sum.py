@@ -10,19 +10,15 @@ def calculate_averages(json_file):
     total_P = 0
     total_F1 = 0
     total_ppl = 0
+    total_sbert = 0
     count = len(data)
-    print(count)
-    count=30
-    i = 0
-    for image_data in data.values():
-        i += 1
-        if i == 31:
-            break
+    for image_data, key in zip(data.values(), data.keys()):
         total_cos_sim += image_data['cos_sim']
         total_lpips += image_data['lpips_sim']
         total_R += image_data["R"]
         total_P += image_data["P"]
         total_F1 += image_data["F1"]
+        total_sbert += image_data["sbert"]
         total_ppl += image_data["ppl"]
 
     
@@ -31,6 +27,7 @@ def calculate_averages(json_file):
     avg_P = total_P / count
     avg_R = total_R / count
     avg_F1 = total_F1 / count
+    avg_sbert = total_sbert / count
     avg_ppl = total_ppl / count
     
     print(f"Average cos_sim: {avg_cos_sim:.3f}")
@@ -38,9 +35,10 @@ def calculate_averages(json_file):
     print(f"Average R: {avg_R:.3f}")
     print(f"Average P: {avg_P:.3f}")
     print(f"Average F1: {avg_F1:.3f}")
+    print(f"Average sbert: {avg_sbert:.3f}")
     print(f"Average ppl: {avg_ppl:.3f}")
 
 # 使用文件
 # json_file = "/home/mingzhel_umass_edu/inverse/hard-prompts-made-easy/result_flickr/best_texts.json"
-json_file = "/home/mingzhel_umass_edu/Modifier_fuzz/results_sdxl_txt_mscoco/result.json"
+json_file = "/project/pi_shiqingma_umass_edu/zwen_umass_edu/baselines/blip_1per/flickr30k/SD35_medium/result.json"
 calculate_averages(json_file)
