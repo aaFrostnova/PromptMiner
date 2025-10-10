@@ -18,12 +18,11 @@ from diffusers import AutoPipelineForText2Image
 from sentence_transformers import SentenceTransformer, util
 import gc
 # ======= 全局路径配置 =======
-ROOT_DIR = Path("/project/pi_shiqingma_umass_edu/zwen_umass_edu/baselines/blip_10per")
+ROOT_DIR = Path("/home/mingzhel_umass_edu/Modifier_fuzz/results")
 DATA_ROOT = Path("/project/pi_shiqingma_umass_edu/mingzheli/CVPR_Inversion/data")
 
 DATASETS = ["diffusiondb", "flickr30k", "lexica_test", "mscoco"]
 MODELS = ["FLUX_1_dev", "SD15", "SD35_medium", "SDXL_Turbo"]
-
 PPL_MODEL_ID = "openai-community/gpt2"
 CACHE_DIR = "/project/pi_shiqingma_umass_edu/mingzheli/.cache"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -124,7 +123,7 @@ def ppl(text: str):
 
 
 
-def get_best_text(image_path, prompts, pipe, spec, seed=0):
+def get_best_text(image_path, prompts, pipe, spec, seed=42):
     generator = torch.Generator(device=DEVICE).manual_seed(seed)
     orig_image = Image.open(image_path).convert("RGB")
 
@@ -167,7 +166,7 @@ def main():
             result_file = results_dir / "result.json"
             prompts_file = data_dir / "prompts.json"
 
-            pipe = AutoPipelineForText2Image.from_pretrained(spec["model_id"]).to(DEVICE)
+            pipe = AutoPipelineForText2Image.from_pretrained(spec["model_id"], torch_dtype=torch.bfloat16).to(DEVICE)
 
             with open(prompts_file, "r") as f:
                 meta_data = json.load(f)
