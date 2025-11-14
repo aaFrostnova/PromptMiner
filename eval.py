@@ -18,47 +18,47 @@ from diffusers import AutoPipelineForText2Image
 from sentence_transformers import SentenceTransformer, util
 import gc
 # ======= 全局路径配置 =======
-ROOT_DIR = Path("/home/mingzhel_umass_edu/Modifier_fuzz/results")
-DATA_ROOT = Path("/project/pi_shiqingma_umass_edu/mingzheli/CVPR_Inversion/data")
+ROOT_DIR = Path("./results")
+DATA_ROOT = Path("./data")
 
-DATASETS = ["diffusiondb", "flickr30k", "lexica_test", "mscoco"]
+DATASETS = ["flickr30k", "lexica_test", "mscoco"]
 MODELS = ["FLUX_1_dev", "SD15", "SD35_medium", "SDXL_Turbo"]
+# MODELS_act = ["SDXL_Turbo"]
 PPL_MODEL_ID = "openai-community/gpt2"
-CACHE_DIR = "/project/pi_shiqingma_umass_edu/mingzheli/.cache"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ======= 模型配置 =======
+
 MODEL_SPECS = {
     "SD15": {
-        "model_id": "/project/pi_shiqingma_umass_edu/mingzheli/model/stable-diffusion-v1-5",
+        "model_id": "sd-legacy/stable-diffusion-v1-5",
         "height": 512, "width": 512,
         "num_inference_steps": 30,
         "guidance_scale": 7.5,
     },
     "SDXL_Turbo": {
-        "model_id": "/project/pi_shiqingma_umass_edu/mingzheli/model/sdxl-turbo",
+        "model_id": "stabilityai/sdxl-turbo",
         "height": 1024, "width": 1024,
         "num_inference_steps": 1,
         "guidance_scale": 0.0,
     },
     "FLUX_1_dev": {
-        "model_id": "/project/pi_shiqingma_umass_edu/mingzheli/model/FLUX.1-dev",
+        "model_id": "black-forest-labs/FLUX.1-dev",
         "height": 1024, "width": 1024,
         "num_inference_steps": 30,
         "guidance_scale": 3.5,
     },
     "SD35_medium": {
-        "model_id": "/project/pi_shiqingma_umass_edu/mingzheli/model/stable-diffusion-3.5-medium",
+        "model_id": "stabilityai/stable-diffusion-3.5-medium",
         "height": 1024, "width": 1024,
         "num_inference_steps": 30,
         "guidance_scale": 4.5,
     },
 }
 
-# ======= 通用模型加载 =======
+
 print("🔹 Loading shared models...")
 sbert_model = SentenceTransformer(
-    "/project/pi_shiqingma_umass_edu/mingzheli/model/all-mpnet-base-v2",
+    "sentence-transformers/all-mpnet-base-v2",
     device=DEVICE
 )
 
@@ -67,14 +67,12 @@ lpips_model = LPIPS(net="alex")
 
 clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
     "ViT-L-14", pretrained="openai", device=DEVICE,
-    cache_dir="/project/pi_shiqingma_umass_edu/mingzheli/model"
 )
 
-ppl_model = GPT2LMHeadModel.from_pretrained(PPL_MODEL_ID, cache_dir=CACHE_DIR).to(DEVICE)
+ppl_model = GPT2LMHeadModel.from_pretrained(PPL_MODEL_ID).to(DEVICE)
 ppl_tokenizer = GPT2TokenizerFast.from_pretrained(PPL_MODEL_ID)
 
 
-# ======= 工具函数 =======
 def calculate_clip_similarity(image_a, image_b):
     processed_a = clip_preprocess(image_a).unsqueeze(0).to(DEVICE)
     processed_b = clip_preprocess(image_b).unsqueeze(0).to(DEVICE)
@@ -154,15 +152,15 @@ def get_best_text(image_path, prompts, pipe, spec, seed=42):
     return best_clip, best_lpips, best_text
 
 
-# ======= 主循环：16 个子文件夹 =======
 def main():
     for dataset in DATASETS:
         for model_name in MODELS:
             print(f"\n🚀 Running {dataset} / {model_name}...")
+            ############
             spec = MODEL_SPECS[model_name]
-
+            ############
             results_dir = ROOT_DIR / dataset / model_name
-            data_dir = DATA_ROOT / dataset / model_name
+            data_dir = DATA_ROOT / dataset / MODELS[0]
             result_file = results_dir / "result.json"
             prompts_file = data_dir / "prompts.json"
 
@@ -177,7 +175,7 @@ def main():
             else:
                 best_texts = {}
 
-            txt_files = [f for f in os.listdir(results_dir) if f.endswith(".txt") and len(f) == 7]
+            txt_files = [f for f in os.listdir(results_dir) if f.endswith(".txt")]
             for txt_file in txt_files:
                 with open(results_dir / txt_file, "r") as file:
                     results = [line.strip() for line in file if line.strip()]
@@ -186,7 +184,7 @@ def main():
                 image_path = data_dir / f"{image_name}.png"
 
                 best_clip, best_lpips, best_text = get_best_text(image_path, results, pipe, spec)
-                ref_text = meta_data[image_name]
+                ref_text = meta_data[image_name[:3]]
                 P, R, F1 = bert_score.score([best_text], [ref_text], lang="en", verbose=False)
 
                 emb_best = sbert_model.encode([best_text], convert_to_tensor=True)
@@ -209,7 +207,6 @@ def main():
                     json.dump(best_texts, file, indent=4)
 
             print(f"✅ Finished {dataset}/{model_name}")
-            # ===== 显存清理 =====
             del pipe
             torch.cuda.empty_cache()
             gc.collect()

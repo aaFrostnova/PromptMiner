@@ -9,7 +9,6 @@ from torch.distributions import Categorical
 import numpy as np
 import gym
 from diffusers import StableDiffusionPipeline, AutoPipelineForText2Image
-# ✨ 导入 BLIP 相关的模型和处理器
 from transformers import CLIPModel, CLIPProcessor, BlipForConditionalGeneration, BlipProcessor
 
 
@@ -24,17 +23,45 @@ else:
     print("Device set to: cpu")
 print("============================================================================================")
 
+MODEL_SPECS = {
+    "SD15": {
+        "model_id": "sd-legacy/stable-diffusion-v1-5",
+        "height": 512, "width": 512,
+        "num_inference_steps": 30,
+        "guidance_scale": 7.5,
+    },
+    "SDXL_Turbo": {
+        "model_id": "stabilityai/sdxl-turbo",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 1,
+        "guidance_scale": 0.0,
+    },
+    "FLUX_1_dev": {
+        "model_id": "black-forest-labs/FLUX.1-dev",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 30,
+        "guidance_scale": 3.5,
+    },
+    "SD35_medium": {
+        "model_id": "stabilityai/stable-diffusion-3.5-medium",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 30,
+        "guidance_scale": 4.5,
+    },
+}
 
 # Custom Environment
 class PromptGenerationEnv(gym.Env):
     def __init__(self,
-                 diffusion_model_name="/project/pi_shiqingma_umass_edu/mingzheli/model/sdxl-turbo",
-                 clip_model_name="/project/pi_shiqingma_umass_edu/mingzheli/model/clip-vit-large-patch14",
-                 blip_model_name="/project/pi_shiqingma_umass_edu/mingzheli/model/blip-image-captioning-large",
+                 diffusion_model_name="sd-legacy/stable-diffusion-v1-5",
+                 clip_model_name="openai/clip-vit-large-patch14",
+                 blip_model_name="Salesforce/blip-image-captioning-large",
                  max_prompt_length=30,
                  image_dir="./image.png",
                  w_clip=0.8,
-                 w_ppl=0.2):
+                 w_ppl=0.2,
+                 gamma=0.98,
+                 args=None):
 
         super(PromptGenerationEnv, self).__init__()
         self.image_path = image_dir
@@ -42,32 +69,43 @@ class PromptGenerationEnv(gym.Env):
         self.w_clip = w_clip
         self.w_ppl = w_ppl
         self.diffusion_model_name = diffusion_model_name
-
+        self.gamma = gamma
         # Diffusion and CLIP models
-        if "sdxl" in self.diffusion_model_name:
-            self.diffusion_model = AutoPipelineForText2Image.from_pretrained(diffusion_model_name).to(device)
+        if "sdxl-turbo" in diffusion_model_name:
+            self.spec = MODEL_SPECS["SDXL_Turbo"]
+        elif "FLUX.1-dev" in diffusion_model_name:
+            self.spec = MODEL_SPECS["FLUX_1_dev"]
+        elif "stable-diffusion-3.5-medium" in diffusion_model_name:
+            self.spec = MODEL_SPECS["SD35_medium"]
         else:
-            self.diffusion_model = StableDiffusionPipeline.from_pretrained(diffusion_model_name).to(device)
+            self.spec = MODEL_SPECS["SD15"]
+        self.pipe = AutoPipelineForText2Image.from_pretrained(self.spec["model_id"], torch_dtype=torch.bfloat16).to(device)
+
         self.clip_model = CLIPModel.from_pretrained(clip_model_name).to(device)
         self.clip_processor = CLIPProcessor.from_pretrained(clip_model_name)
         
         self.processor = BlipProcessor.from_pretrained(blip_model_name)
         self.action_space = gym.spaces.Discrete(self.processor.tokenizer.vocab_size)
         
-        # ✨ 核心修改 1: 不再需要初始 token，prompt 从一个空列表开始
         self.initial_tokens = []
-
+        self.seed = args.seed
         self.observation_space = gym.spaces.Dict({
             "prompt": gym.spaces.Sequence(gym.spaces.Discrete(self.processor.tokenizer.vocab_size)),
             "image_encoding": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.clip_model.config.projection_dim,), dtype=np.float32)
         })
 
+        self.prev_phi = 0.0
+
     def reset(self):
-        # ✨ self.prompt 现在被初始化为空列表
         self.prompt = self.initial_tokens.copy()
+
         self.target_image = PIL.Image.open(self.image_path).convert("RGB")
         image_inputs = self.clip_processor(images=self.target_image, return_tensors="pt").to(device)
-        self.image_encoding = self.clip_model.get_image_features(**image_inputs).detach().cpu().numpy()[0]
+        with torch.no_grad():
+            img_feat = self.clip_model.get_image_features(**image_inputs)
+            self.image_encoding = img_feat.detach().cpu().numpy()[0]
+
+        self.prev_phi = 0.0
 
         return {
             "prompt": self.prompt.copy(),
@@ -75,32 +113,60 @@ class PromptGenerationEnv(gym.Env):
             "target_image": self.target_image
         }
 
+    def _clip_text_image_cosine(self, prompt_text: str) -> float:
+        if len(prompt_text.strip()) == 0:
+            return 0.0
+
+        text_inputs = self.clip_processor(text=[prompt_text], return_tensors="pt", padding=True).to(device)
+        with torch.no_grad():
+            txt_feat = self.clip_model.get_text_features(**text_inputs).detach().cpu().numpy()[0]
+
+
+        num = np.dot(txt_feat, self.image_encoding)
+        den = (np.linalg.norm(txt_feat) * np.linalg.norm(self.image_encoding) + 1e-12)
+        return float(num / den)
+
     def step(self, action):
         self.prompt.append(action)
         done = (len(self.prompt) >= self.max_prompt_length) or (action == self.processor.tokenizer.sep_token_id)
 
-        # 对于非终止状态，奖励为0
         reward = 0.0
-        clip_similarity = 0.0
-        # 仅在 episode 结束时计算最终奖励
-        if done:
-            prompt_text = self.processor.tokenizer.decode(self.prompt, skip_special_tokens=True)
+        clip_similarity = 0.0  
 
-            try:
-                # --- 1. 生成图片并计算原始 CLIP 相似度 ---
-                generator = torch.Generator(device=device).manual_seed(0)
-                if "sdxl" in self.diffusion_model_name:
-                    generated_image = self.diffusion_model(prompt_text, num_inference_steps=1, guidance_scale=0.0, generator=generator).images[0]
-                else:
-                    generated_image = self.diffusion_model(prompt_text, generator=generator).images[0]
+        prompt_text = self.processor.tokenizer.decode(self.prompt, skip_special_tokens=True)
+
+        try:
+            if not done:
+                phi_t = self._clip_text_image_cosine(prompt_text)
+                reward = 10*(self.gamma*phi_t - self.prev_phi)
+                if len(self.prompt) == 1:
+                    reward = 0.0
+                self.prev_phi = phi_t
+
+                print(f"Step (t={len(self.prompt)}). Phi(text,img): {phi_t:.4f}, "
+                      f"Delta: {reward:.4f}, Prompt: '{prompt_text}'")
+
+            else:
+                generator = torch.Generator(device=device).manual_seed(self.seed)
+                generated_image = self.pipe(prompt_text,
+                       height=self.spec["height"],
+                       width=self.spec["width"],
+                       num_inference_steps=self.spec["num_inference_steps"],
+                       guidance_scale=self.spec["guidance_scale"],
+                       generator=generator).images[0]
+
                 generated_inputs = self.clip_processor(images=generated_image, return_tensors="pt").to(device)
-                generated_encoding = self.clip_model.get_image_features(**generated_inputs).detach().cpu().numpy()[0]
-                
-                clip_similarity = np.dot(generated_encoding, self.image_encoding) / (np.linalg.norm(generated_encoding) * np.linalg.norm(self.image_encoding))
+                with torch.no_grad():
+                    gen_feat = self.clip_model.get_image_features(**generated_inputs).detach().cpu().numpy()[0]
 
-                # ✨ --- 2. 根据您的分级阈值规则设置最终奖励 ---
+                clip_similarity = np.dot(gen_feat, self.image_encoding) / (
+                    np.linalg.norm(gen_feat) * np.linalg.norm(self.image_encoding) + 1e-12
+                )
+                '''
                 if clip_similarity > 0.90:
                     reward = 3.0
+                elif clip_similarity > 0.85:
+                    reward = 2.5
                 elif clip_similarity > 0.80:
                     reward = 2.0
                 elif clip_similarity > 0.75:
@@ -110,19 +176,16 @@ class PromptGenerationEnv(gym.Env):
                 elif clip_similarity > 0.65:
                     reward = 0.5
                 else:
-                    # ✨ 核心修改：当分数低于0.65时，奖励是连续的
-                    # 这样做可以让 0.6 的分比 0.5 的分得到更高的奖励
-                    # 例如，这里将 [0, 0.65] 区间映射到 [-1.0, -0.35]
                     reward = clip_similarity - 1.0
-                
-                # (可选) 增加日志，方便观察
-                print(f"Done. Clip Sim: {clip_similarity:.4f}, Reward: {reward}, Prompt: '{prompt_text}'")
+                '''
+                reward = clip_similarity
+                print(f"Done. Image-Image Sim: {clip_similarity:.4f}, Final Reward: {reward:.4f}, "
+                      f"Prompt: '{prompt_text}'")
 
-            except Exception as e:
-                print(f"Error during image generation or CLIP calculation: {e}")
-                # ✨ 如果过程中出现任何错误，也给予 -1 的惩罚
-                reward = -1.0
-        
+        except Exception as e:
+            print(f"Error during CLIP calculation or image generation: {e}")
+            reward = -1.0
+
         state = {
             "prompt": self.prompt.copy(),
             "image_encoding": self.image_encoding,
@@ -131,7 +194,8 @@ class PromptGenerationEnv(gym.Env):
         
         return state, reward, done, {}, clip_similarity
 
-# Rollout Buffer (No changes needed)
+
+# Rollout Buffer
 class RolloutBuffer:
     def __init__(self):
         self.actions = []
@@ -156,19 +220,15 @@ class ActorCritic(nn.Module):
         self.mllm = mllm 
         self.processor = processor
 
-        # ✨ 核心修复 1: 统一使用 768 维的文本 hidden_size
-        self.hidden_dim = self.mllm.config.text_config.hidden_size  # This is 768
-
+        self.hidden_dim = self.mllm.config.text_config.hidden_size  # 768
         print(f"Initializing ActorCritic: Consistently using hidden dimension = {self.hidden_dim}")
 
-        # ✨ Adapter 不改变维度 (768 -> 1536 -> 768)
         self.adapter_mlp = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim * 2),
             nn.ReLU(),
             nn.Linear(self.hidden_dim * 2, self.hidden_dim)
         ).to(device)
 
-        # ✨ Value head 也作用于 768 维的文本状态
         self.value_head = nn.Sequential(
             nn.Linear(self.hidden_dim, 2048),
             nn.ReLU(),
@@ -176,9 +236,6 @@ class ActorCritic(nn.Module):
         ).to(device)
 
     def _forward_model(self, states_batch):
-        """
-        ✨ [V4 - 已修复 AttributeError for CausalLMOutput...]
-        """
         images_batch = [s["target_image"] for s in states_batch]
         prompts_ids_batch = [s["prompt"] for s in states_batch]
 
@@ -188,26 +245,20 @@ class ActorCritic(nn.Module):
             padding="longest",
             return_tensors="pt",
         ).to(self.mllm.device)
-
-        # --- 手动分步前向传播以获取正确的 state ---
         
         vision_outputs = self.mllm.vision_model(pixel_values=inputs['pixel_values'])
         image_embeds = vision_outputs[0]
         image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
 
-        # ✨ 核心修复 1: 必须向解码器明确请求 hidden_states
         decoder_outputs = self.mllm.text_decoder(
             input_ids=inputs['input_ids'],
             attention_mask=inputs['attention_mask'],
             encoder_hidden_states=image_embeds,
             encoder_attention_mask=image_attention_mask,
-            output_hidden_states=True  # <-- 关键！
+            output_hidden_states=True
         )
         
-        # ✨ 核心修复 2: 从 .hidden_states 元组中获取最后一层的状态
         last_hidden_states = decoder_outputs.hidden_states[-1]
-        
-        # --- 逻辑不变 ---
         batch_size = len(states_batch)
         sequence_lengths = inputs['attention_mask'].sum(dim=1)
         
@@ -237,7 +288,6 @@ class ActorCritic(nn.Module):
         return action_logprobs, state_values, dist_entropy
 
 
-# PPO Class (No changes needed, as it relies on ActorCritic and Env)
 class PPO:
     def __init__(self, lr_actor=1e-5, lr_critic=1e-5, gamma=0.99, K_epochs=4, eps_clip=0.2):
         self.gamma = gamma
@@ -245,7 +295,7 @@ class PPO:
         self.K_epochs = K_epochs
         self.buffer = RolloutBuffer()
         
-        blip_model_name = "/project/pi_shiqingma_umass_edu/mingzheli/model/blip-image-captioning-large"
+        blip_model_name = "Salesforce/blip-image-captioning-large"
         mllm = BlipForConditionalGeneration.from_pretrained(blip_model_name).to(device)
         
         mllm.gradient_checkpointing_enable()
@@ -332,7 +382,6 @@ class PPO:
         print(f"Loaded adapter_mlp and value_head weights from {checkpoint_path}")
 
 
-# Training Loop
 def main():
     env = PromptGenerationEnv(image_dir="./image.png")
     ppo = PPO()
@@ -358,7 +407,6 @@ def main():
                 ppo.update()
                 timestep = 0
         
-        # ✨ 解码逻辑现在也简化了
         prompt_text = ppo.policy.processor.tokenizer.decode(state["prompt"], skip_special_tokens=True)
         print(f"Episode {episode + 1}: Reward = {episode_reward:.4f}, Prompt = '{prompt_text}'")
 

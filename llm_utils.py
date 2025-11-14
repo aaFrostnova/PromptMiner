@@ -1,6 +1,6 @@
 import torch
 from fastchat.model import load_model
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 @torch.inference_mode()
 def create_model(args, model_path):
@@ -47,16 +47,26 @@ def prepare_model_and_tok_vl(args):
     
     if type(args.image_model_path) == str:
         PROCESSOR = AutoProcessor.from_pretrained(args.image_model_path)
-        VL_MODEL = Qwen2VLForConditionalGeneration.from_pretrained(
-            args.image_model_path
-        ).to(args.device)
+        if 'Qwen2.5' in args.image_model_path:
+            VL_MODEL = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                args.image_model_path
+            ).to(args.device)
+        else:
+            VL_MODEL = Qwen2VLForConditionalGeneration.from_pretrained(
+                args.image_model_path
+            ).to(args.device)
     elif type(args.image_model_path) == list:
         MODEL, TOK = [], []
         for image_model_path in args.image_model_path:
             processor = AutoProcessor.from_pretrained(image_model_path)
-            vl_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                image_model_path
-            ).to(args.device)
+            if 'Qwen2.5' in image_model_path:
+                vl_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    image_model_path
+                ).to(args.device)
+            else:
+                vl_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    image_model_path
+                ).to(args.device)
             PROCESSOR.append(processor)
             VL_MODEL.append(vl_model)
     else:

@@ -1,4 +1,4 @@
-# utils_image.py
+# image_utils.py
 
 import base64
 import io
@@ -12,7 +12,36 @@ from PIL import Image
 from diffusers import StableDiffusionPipeline, AutoPipelineForText2Image
 import re
 import string
-# --- Image & Text Helper Functions ---
+import json 
+
+# --- Image & Text Helper Functions --- 
+
+MODEL_SPECS = {
+    "SD15": {
+        "model_id": "sd-legacy/stable-diffusion-v1-5",
+        "height": 512, "width": 512,
+        "num_inference_steps": 30,
+        "guidance_scale": 7.5,
+    },
+    "SDXL_Turbo": {
+        "model_id": "stabilityai/sdxl-turbo",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 1,
+        "guidance_scale": 0.0,
+    },
+    "FLUX_1_dev": {
+        "model_id": "black-forest-labs/FLUX.1-dev",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 30,
+        "guidance_scale": 3.5,
+    },
+    "SD35_medium": {
+        "model_id": "stabilityai/stable-diffusion-3.5-medium",
+        "height": 1024, "width": 1024,
+        "num_inference_steps": 30,
+        "guidance_scale": 4.5,
+    },
+}
 
 def encode_image_to_base64(image: Image.Image) -> str:
     buffered = io.BytesIO()
@@ -22,11 +51,17 @@ def encode_image_to_base64(image: Image.Image) -> str:
 def load_diffusion_model(model_path, device):
     print(f"Loading image generation model: {model_path}...")
     try:
-        pipeline_class = AutoPipelineForText2Image if "sdxl" in model_path else StableDiffusionPipeline
-        pipeline = pipeline_class.from_pretrained(model_path, torch_dtype=torch.float16)
-        pipeline.to(device)
+        if "sdxl-turbo" in model_path:
+            spec = MODEL_SPECS["SDXL_Turbo"]
+        elif "FLUX.1-dev" in model_path:
+            spec = MODEL_SPECS["FLUX_1_dev"]
+        elif "stable-diffusion-3.5-medium" in model_path:
+            spec = MODEL_SPECS["SD35_medium"]
+        else:
+            spec = MODEL_SPECS["SD15"]
+        pipeline = AutoPipelineForText2Image.from_pretrained(spec["model_id"], torch_dtype=torch.bfloat16).to(device)
         print("Image generation model loaded successfully!")
-        return pipeline
+        return pipeline, spec
     except Exception as e:
         raise RuntimeError(f"Failed to load diffusion model: {e}")
 
@@ -52,14 +87,16 @@ def get_caption_from_image(image: Image.Image, vlm_model_name: str) -> str:
     )
     return response.choices[0].message.content.strip()
 
-def generate_image_from_prompt(prompt: str, pipeline, args):
+def generate_image_from_prompt(prompt: str, pipeline, spec, args):
     if pipeline is None: return Image.new('RGB', (512, 512), color='black')
     try:
         generator = torch.Generator(device=pipeline.device).manual_seed(args.seed)
-        if "sdxl" in args.target_model_path:
-            return pipeline(prompt=prompt, num_inference_steps=1, guidance_scale=0, generator=generator).images[0]
-        else:
-            return pipeline(prompt=prompt, num_inference_steps=50, generator=generator).images[0]
+        return pipeline(prompt,
+                height=spec["height"],
+                width=spec["width"],
+                num_inference_steps=spec["num_inference_steps"],
+                guidance_scale=spec["guidance_scale"],
+                generator=generator).images[0]
     except Exception as e:
         print(f"Error during image generation: {e}")
         return Image.new('RGB', (512, 512), color='grey')
@@ -75,44 +112,55 @@ def calculate_clip_similarity(image_a, image_b, clip_model, clip_preprocess, dev
         feat_b /= feat_b.norm(dim=-1, keepdim=True)
         return (feat_a @ feat_b.T).item()
 
-def execute(mutate_results, target_image, diffusion_pipeline, clip_model, clip_preprocess, device, args):
+def execute(mutate_results, target_image, diffusion_pipeline, spec, clip_model, clip_preprocess, device, args):
     prompt_template = mutate_results[0] if isinstance(mutate_results, list) else mutate_results
-    generated_image = generate_image_from_prompt(prompt_template, diffusion_pipeline, args)
+    generated_image = generate_image_from_prompt(prompt_template, diffusion_pipeline, spec, args)
     similarity_score = calculate_clip_similarity(generated_image, target_image, clip_model, clip_preprocess, device)
     return similarity_score, generated_image, prompt_template
 
 # --- MCTS and Fuzzing State Management ---
 
 class mutator(Enum):
-    GENERATE_NEW = 0
-    REFINE_DETAIL = 1
-    CHANGE_POSITION = 2
+    GEN_DESC_STYLE     = 0  
+    MODIFY_STYLE       = 1  
+    MODIFY_DESC        = 2  
+    PARAPHRASE_BASE    = 3  
+    ENRICH_BASE_INLINE = 4  
+    FIX_GRAMMAR        = 5  
+
 
 class prompt_node:
-    def __init__(self, text, detail, position, parent=None, generation=0, mutation=None, index=0, response=0.0):
+    def __init__(
+        self, 
+        text,                
+        relation,             
+        style, 
+        base_prompt=None,     
+        parent=None, 
+        generation=0, 
+        mutation=None, 
+        index=0, 
+        response=0.0
+    ):
         self.text = text
-        self.detail = detail
-        self.position = position
+        self.relation = relation
+        self.style = style
+        self.base_prompt = base_prompt if base_prompt is not None else text  
         self.parent = parent
         self.generation = parent.generation + 1 if parent and hasattr(parent, 'generation') else generation
         self.mutation = mutation
         self.index = index
-        self.response = response 
+        self.response = response
         self.children = []
         self.visited_num = 0
         self.mcts_reward = 0.0
 
 class fuzzing_status:
-    """
-    更新后的 fuzzing_status 类，初始化方法现在直接接收节点列表。
-    """
     def __init__(self, initial_nodes, max_query=-1):
         self.max_query = max_query
-        # 查询次数应从初始节点的数量开始
         self.query = len(initial_nodes)
-        # 直接使用传入的节点列表作为种子队列
         self.seed_queue = initial_nodes
-        self.max_seed_pool_size = 15 # 您可以根据需要调整种子池大小
+        self.max_seed_pool_size = 5
         self.seed_selection_strategy = self.seed_selection_MCTS
         self.pointer = 0
 
@@ -122,32 +170,23 @@ class fuzzing_status:
     def seed_selection_MCTS(self):
         if not self.seed_queue: return None
         total_visits = sum(node.visited_num for node in self.seed_queue) + 1
-        
-        # UCT 公式： 探索 (exploration) + 利用 (exploitation)
-        # 增加了探索权重，鼓励尝试更多可能性
         best_node = max(self.seed_queue, key=lambda n: 
             (n.mcts_reward / (n.visited_num + 1e-5)) + 
             1.5 * np.sqrt(np.log(total_visits) / (n.visited_num + 1e-5))
         )
-        
         self.pointer = self.seed_queue.index(best_node)
         return best_node
 
     def update_with_node(self, new_node: prompt_node):
         self.query += 1
-        
-        # 精英池管理策略
         if len(self.seed_queue) < self.max_seed_pool_size:
             self.seed_queue.append(new_node)
         else:
-            # 如果新节点的分数高于池中最差的节点，则替换
             worst_node = min(self.seed_queue, key=lambda n: n.response)
             if new_node.response > worst_node.response:
                 self.seed_queue.remove(worst_node)
                 self.seed_queue.append(new_node)
         
-        # MCTS 反向传播更新
-        # 确保指针有效
         if self.pointer < len(self.seed_queue):
             node_to_update = self.seed_queue[self.pointer]
             node_to_update.visited_num += 1
@@ -159,193 +198,310 @@ class fuzzing_status:
         return max(self.seed_queue, key=lambda node: node.response)
 
 # --- Mutation Operator Logic ---
+def mutate_operator(base_prompt: str, mutation_type: mutator, parent_node=None, base_only: bool=False):
+    if base_only:
+        base_only_set = [mutator.ENRICH_BASE_INLINE, mutator.FIX_GRAMMAR, mutator.PARAPHRASE_BASE]
+        if mutation_type not in base_only_set:
+            mutation_type = random.choice(base_only_set)
 
-# --- 文本突变函数 ---
-# 在 utils_image.py 中，替换掉旧的 mutate_operator 函数
-def mutate_operator(base_prompt: str, mutation_type: mutator, parent_node=None):
-    # 系统指令保持不变
     system_prompt = (
-        "You are an expert prompt engineer for text-to-image models. "
-        "Your task is to analyze the provided image and complete a base prompt by providing text for 'detail' and 'position' that accurately describe the image. "
-        "Your response MUST strictly follow the format 'detail: [text]\\nposition: [text]' and contain nothing else."
+        "you are a prompt mutator for text-to-image diffusion models.\n"
+        "given a base prompt and an input image, you must return EXACTLY ONE SINGLE-LINE JSON object.\n"
+        "- lowercase english only; no markdown; no code fences; no trailing commas; no extra text.\n"
+        "- never insert line breaks inside values.\n"
+        "- if the base prompt conflicts with the image, trust the image.\n"
+        "- be concrete and visual; do not invent invisible objects.\n"
+        "- field-specific rules:\n"
+        "  description: 15-35 words, write as a compact comma-separated tag string (not full sentences). include: subject and key attributes or pose, setting/location, composition/shot/angle, lighting, overall color tendency, one brief quality token (e.g., highly detailed or sharp focus), optional material/texture cue, artist, plus up to 2 simple negatives (e.g., no watermark, no text). use only visible facts.\n"
+
+        "  style: <= 12 words, a short comma-separated tag string of medium/movement/lens/quality only (e.g., digital painting, photorealistic, vector art, isometric, 35mm lens, 85mm lens, film grain, clean render). do not include scene facts or lighting.\n"
+        "  base_prompt: <= 15 words, preserve the original meaning, clearer phrasing, avoid style or lighting tokens.\n"
+        "examples:\n"
+        " input(base): 'two samurai duel in a bamboo forest'\n"
+        " output(desc+style): {\"description\":\"bamboo grove, two samurai facing between tall stalks, medium shot, eye-level, dappled sunlight, green tones, foreground leaves, no text\",\"style\":\"ink illustration, ukiyo-e inspired, paper texture\"}\n"
+        " input(base): 'astronaut and robot on mars at dawn'\n"
+        " output(modify-desc): {\"description\":\"red dunes, astronaut left of small robot, wide shot, low angle, soft dawn light, cool shadows, distant mountains, no watermark\"}\n"
+        " input(base): 'portrait of an old musician in neon city'\n"
+        " output(modify-style): {\"style\":\"photorealistic, 85mm lens, cinematic still\"}\n"
+        " input(base): 'a child reading a book under a tree'\n"
+        " output(paraphrase-base): {\"base_prompt\":\"a child reading beneath a tree\"}\n"
     )
 
-    # --- 任务1: (基于图片) 生成全新的 detail 和 position ---
-    if mutation_type == mutator.GENERATE_NEW:
-        user_prompt = f"""Given the base prompt:
-            '{base_prompt}'
+    if mutation_type == mutator.ENRICH_BASE_INLINE:
+        user_prompt = (
+            "task: ENRICH the base prompt by inserting concise, image-grounded modifiers WITHOUT changing its syntactic skeleton or word order.\n"
+            f"base prompt: '{base_prompt}'\n"
+            "you will receive the IMAGE together with this message. use ONLY details that are VISIBLE in the image.\n"
+            "output schema (single line json): {\"base_prompt\":\"...\"}\n"
+            "constraints:\n"
+            "- preserve the original tokens as an ordered subsequence: do not delete, replace, or reorder existing words; no synonym substitution.\n"
+            "- keep the subject–verb–object–prepositional structure intact.\n"
+            "- INSERT 2–6 words total, placed immediately AFTER the nouns/verbs they modify (adjectives/appositives for nouns; short adverbs/adjuncts for verbs).\n"
+            "- allowed insertions: count/quantity (one/two), object attributes (color, size, material), pose/state, simple spatial cues relative to BACKGROUND (e.g., near the fence, in front of the gate), and other concrete scene facts visible in the image.\n"
+            "- forbid insertions about style/lighting/lens/artist or abstract aesthetics (these belong to style).\n"
+            "- if a detail is uncertain or not visible, DO NOT add it; trust the image over the text.\n"
+            "- lowercase only; no quotes; no extra commentary.\n"
+            "examples:\n"
+            " base: 'a child reading a book under a tree'\n"
+            " enriched: {'base_prompt':'a small child quietly reading a worn book under a shady tree'}\n"
+            " base: 'a dog runs across a field'\n"
+            " enriched: {'base_prompt':'a brown dog runs swiftly across a grassy field'}\n"
+            "return ONLY the json line."
+        )
 
-            Analyze the attached image and generate a compelling 'detail' and 'position' to complete the prompt. The generated text must describe the visual content of the image.
+    elif mutation_type == mutator.FIX_GRAMMAR:
+        user_prompt = (
+            "task: CLEANUP the base prompt by fixing grammar/spelling, removing duplicated words/phrases, and correcting spacing/punctuation ONLY.\n"
+            f"base prompt: '{base_prompt}'\n"
+            "output schema (single line json): {\"base_prompt\":\"...\"}\n"
+            "constraints:\n"
+            "- do NOT add any new content or modifiers; do NOT introduce synonyms; do NOT reorder clauses.\n"
+            "- preserve the original subject–verb–object–prepositional order and overall sentence structure.\n"
+            "- only remove repeated tokens/phrases, fix typos, collapse multiple spaces, and standardize minimal punctuation.\n"
+            "- keep length approximately unchanged (within ±2 words of the original).\n"
+            "- lowercase only; no quotes; no extra commentary.\n"
+            "return ONLY the json line."
+        )
 
-            # Constraints:
-            # - The 'detail' MUST be under 15 words.
-            # - The 'position' MUST be under 10 words."""
+    elif mutation_type == mutator.GEN_DESC_STYLE:
+        user_prompt = (
+            "task: generate a NEW description and a NEW style from the base prompt and the image.\n"
+            "base prompt: '{base_prompt}'\n"
+            'output schema (single line json): {"description":"...","style":"..."}\n'
+            "constraints:\n"
+            "- description must be a compact comma-separated tag string (15–35 words), not full sentences.\n"
+            "- include, in order when possible: subject with salient attributes or pose, setting/location, composition/shot/angle, lighting, overall color tendency, one brief quality token (e.g., highly detailed or sharp focus), optional material/texture cue, artist, optional negatives (max 2: no watermark, no text).\n"
+            "- include one explicit spatial or depth cue relating subject(s) to background (e.g., foreground, background, in front of distant hills).\n"
+            "- use only concrete, visible details; avoid story terms and abstractions.\n"
+            "- style contains only medium/movement/lens/quality tokens (≤12 words); no scene facts and no lighting; no artist names.\n"
+            "return ONLY the json line.\n"
+        )
 
-    # --- 任务2: (基于图片) 优化已有的 detail ---
-    elif mutation_type == mutator.REFINE_DETAIL:
+    elif mutation_type == mutator.MODIFY_STYLE:
         if not parent_node:
-            return mutate_operator(base_prompt, mutator.GENERATE_NEW)
-        
-        user_prompt = f"""Given the base prompt:
-            '{base_prompt}'
+            return system_prompt, (
+                "task: generate a NEW description and a NEW style from the base prompt and the image.\n"
+                f"base prompt: '{base_prompt}'\n"
+                "output schema: {\"description\":\"...\",\"style\":\"...\"}\n"
+                "return ONLY the json line."
+            )
+        user_prompt = (
+            "task: CHANGE STYLE ONLY while preserving entities and relations in the current description.\n"
+            f"current style: {getattr(parent_node, 'style', '')}\n"
+            f"current description: {getattr(parent_node, 'relation', getattr(parent_node, 'description', ''))}\n"
+            f"base prompt: '{base_prompt}'\n"
+            'output schema (single line json): {"style":"..."}\n'
+            "constraints:\n"
+            "- produce a concise comma-separated tag string (≤12 words) consisting only of medium/movement/lens/quality tokens (e.g., digital painting, photorealistic, vector art, isometric, 35mm lens, 85mm lens, film grain, clean render).\n"
+            "- do NOT include scene facts or lighting\n"
+            "- keep the aesthetic consistent with the base and description; improve clarity or fidelity rather than altering content.\n"
+            "return ONLY the json line.\n"
+        )
 
-            And the current completion:
-            detail: {parent_node.detail}
-            position: {parent_node.position}
-
-            Now, analyze the attached image and refine ONLY the 'detail' part to better describe the visual content. Keep the 'position' exactly the same.
-
-            # Constraint:
-            # - The new 'detail' MUST be under 15 words."""
-
-    # --- 任务3: (基于图片) 创造新的 position ---
-    elif mutation_type == mutator.CHANGE_POSITION:
+    elif mutation_type == mutator.MODIFY_DESC:
         if not parent_node:
-            return mutate_operator(base_prompt, mutator.GENERATE_NEW)
-            
-        user_prompt = f"""Given the base prompt:
-            '{base_prompt}'
+            return system_prompt, (
+                "task: generate a NEW description and a NEW style from the base prompt and the image.\n"
+                f"base prompt: '{base_prompt}'\n"
+                "output schema: {\"description\":\"...\",\"style\":\"...\"}\n"
+                "return ONLY the json line."
+            )
+        user_prompt = (
+            "task: CHANGE DESCRIPTION ONLY while preserving the subject meaning and current style.\n"
+            f"current description: {getattr(parent_node, 'relation', getattr(parent_node, 'description', ''))}\n"
+            f"current style: {getattr(parent_node, 'style', '')}\n"
+            f"base prompt: '{base_prompt}'\n"
+            'output schema (single line json): {"description":"..."}\n'
+            "constraints:\n"
+            "- produce a compact comma-separated tag string (15–35 words), not full sentences.\n"
+            "- include, in order when possible: subject and attributes/pose, setting/location, composition/shot/angle, lighting, overall color tendency, one quality token (e.g., highly detailed or sharp focus), optional material/texture, artist, optional negatives (max 2).\n"
+            "- include one explicit spatial or depth cue (e.g., foreground, background, in front of, near).\n"
+            "- keep to visible, concrete details only; avoid story/abstract words.\n"
+            "- do not change the style semantics.\n"
+            "return ONLY the json line.\n"
 
-            And the current completion:
-            detail: {parent_node.detail}
-            position: {parent_node.position}
+        )
 
-            Now, analyze the attached image and invent a new 'position' or camera angle that better suits the image content. Keep the 'detail' exactly the same.
+    elif mutation_type == mutator.PARAPHRASE_BASE:
+        user_prompt = (
+            "task: PARAPHRASE the base prompt WITHOUT changing its meaning, and enforce the structure:\n"
+            "WHO/WHAT + is doing + WHERE.\n"
+            f"base prompt: '{base_prompt}'\n"
+            "output schema (single line json): {\"base_prompt\":\"...\"}\n"
+            "constraints:\n"
+            "- <= 15 words total.\n"
+            "- structure must be strictly: <who/what> + 'is' + <present participle verb phrase> + <where-phrase>.\n"
+            "- examples of valid skeletons:\n"
+            "  'a child is reading under a tree'\n"
+            "  'two samurai are dueling in a bamboo forest'\n"
+            "  'a red car is driving along a rainy street'\n"
+            "- who/what: a concrete subject noun phrase (singular/plural ok: 'a child' / 'two samurai').\n"
+            "- is doing: present progressive ('is/are' + V-ing), one concise action.\n"
+            "- where: a concrete location or scene prepositional phrase (e.g., 'under a tree', 'in a market').\n"
+            "- no style/lighting/lens/artist tokens.\n"
+            "- preserve entities and their core relations from the base prompt; trust the image if there is a conflict.\n"
+            "- lowercase only; no quotes; no extra commentary.\n"
+            "return ONLY the json line."
+        )
 
-            # Constraint:
-            # - The new 'position' MUST be under 10 words."""
     else:
-        return mutate_operator(base_prompt, mutator.GENERATE_NEW)
+        user_prompt = (
+            "task: generate a NEW description and a NEW style from the base prompt and the image.\n"
+            f"base prompt: '{base_prompt}'\n"
+            "output schema: {\"description\":\"...\",\"style\":\"...\"}\n"
+            "return ONLY the json line."
+        )
 
     return system_prompt, user_prompt
-        
+
 
 def mutate_single(base_prompt: str, mutation_type: mutator, args, target_image: Image.Image, parent_node=None, PROCESSOR=None, VL_MODEL=None) -> tuple[str, str, str]:
-    """
-    执行单次多模态变异操作，将图片和文本指令一起发送给 LLM。
-    """
-    # 1. 生成文本指令
-    system_prompt, user_prompt = mutate_operator(base_prompt, mutation_type, parent_node)
+    system_prompt, user_prompt = mutate_operator(base_prompt, mutation_type, parent_node, base_only=args.base_only)
     
     mutated_text = ""
-    if args.image_model_path.startswith("gpt-"):
+    if str(args.image_model_path).startswith("gpt-"):
         try:
-            # 2. 将图片编码为 Base64
             base64_image = encode_image_to_base64(target_image)
             image_data_url = f"data:image/jpeg;base64,{base64_image}"
-
-            # 3. 构建多模态的 messages payload
-            messages = [
-                # Vision 模型通常将 system prompt 的内容合并到 user message 中
-                {
-                    "role": "user",
-                    "content": [
-                        # 首先是文本指令
-                        {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"},
-                        # 然后是图片
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image_data_url}
-                        }
-                    ]
-                }
-            ]
-
-            # 4. 调用 OpenAI Vision API
+            messages = [{"role": "user", "content": [
+                {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"},
+                {"type": "image_url", "image_url": {"url": image_data_url}}
+            ]}]
             response = openai.chat.completions.create(
-                model=args.image_model_path,  # 确保这里使用的是 gpt-4o 或其他 vision 模型
+                model=args.image_model_path,
                 messages=messages,
                 temperature=1.0, 
                 n=1,
-                max_tokens=50 
+                max_tokens=200
             )
             mutated_text = response.choices[0].message.content.strip()
-        
         except Exception as e:
             print(f"LLM Vision API request failed: {e}")
-    
     else:
         mutated_text = local_vl_request(system_prompt, user_prompt, args.target_image_path, PROCESSOR, VL_MODEL, args)
 
-    # 5. 解析并清理结果 (这部分逻辑不变)
-    detail, position = parse_llm_response(mutated_text)
-    detail = clean_text(detail)
-    position = clean_text(position)
-    
-    # 6. 拼接最终的 prompt (这部分逻辑不变)
-    connector = " " if not base_prompt.endswith(" ") and not detail.startswith(" ") else ""
-    if detail == "" and parent_node:
-        full_prompt = f"{base_prompt}{connector}{parent_node.detail}, {position}"
-    elif position == "" and parent_node:
-        full_prompt = f"{base_prompt}{connector}{detail}, {parent_node.position}"
-    else:
-        full_prompt = f"{base_prompt}{connector}{detail}, {position}"
-    
-    return full_prompt, detail, position
+    parsed = parse_llm_response(mutated_text)  # dict: {description, style, base_prompt}
+    description = parsed.get("description", "")  # relation == description
+    style = parsed.get("style", "")
+    new_base = parsed.get("base_prompt", "")
+
+    if mutation_type == mutator.MODIFY_STYLE and parent_node:
+        if not style:
+            style = parent_node.style  
+        if description == "":
+            description = getattr(parent_node, 'relation', getattr(parent_node, 'description', ""))
+
+    if mutation_type == mutator.MODIFY_DESC and parent_node:
+        if not description:
+            description = getattr(parent_node, 'relation', getattr(parent_node, 'description', ""))
+        if style == "":
+            style = parent_node.style
+
+    if mutation_type == mutator.GEN_DESC_STYLE:
+        if not description and parent_node:
+            description = getattr(parent_node, 'relation', getattr(parent_node, 'description', ""))
+        if not style and parent_node:
+            style = parent_node.style
+
+    if mutation_type == mutator.PARAPHRASE_BASE:
+        if new_base:
+            base_prompt = clean_text(new_base) or base_prompt
+        if parent_node:
+            if not description:
+                description = getattr(parent_node, 'relation', getattr(parent_node, 'description', ""))
+            if not style:
+                style = parent_node.style
+
+    if mutation_type in {mutator.ENRICH_BASE_INLINE, mutator.FIX_GRAMMAR, mutator.PARAPHRASE_BASE}:
+        if new_base:
+            base_prompt = clean_text(new_base) or base_prompt
+        if parent_node:
+            if not description:
+                description = getattr(parent_node, 'relation', getattr(parent_node, 'description', ""))
+            if not style:
+                style = parent_node.style
+
+    description = clean_text(description)
+    style = clean_text(style)
+    parts = [p for p in [base_prompt, description, style] if p]
+    full_prompt = ", ".join(parts).strip(" ,")
+
+    return full_prompt, base_prompt, description, style
 
 
-def parse_llm_response(llm_output: str) -> tuple[str, str]:
-    """
-    一个健壮的解析器，用于从 LLM 的原始输出中提取 'detail' 和 'position'。
+def parse_llm_response(llm_output: str) -> dict:
+    def _clean_val(s: str) -> str:
+        if not isinstance(s, str):
+            return ""
+        s = s.strip()
+        s = s.replace("\n", " ").replace("\r", " ")
+        s = re.sub(r"\s{2,}", " ", s)
+        return s.lower().strip(' "\'')
 
-    Args:
-        llm_output (str): 从 LLM API 返回的原始字符串。
+    def _extract_json_block(text: str) -> str | None:
+        if not text:
+            return None
+        t = text.strip()
+        t = re.sub(r"^```(?:json|JSON)?\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+        m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+        return m.group(0) if m else None
 
-    Returns:
-        tuple[str, str]: 一个包含 (detail, position) 的元组。
-                         如果找不到某个字段，会使用默认值。
-    """
-    # 默认值，用于处理解析失败或字段缺失的情况
-    default_detail = ""
-    default_position = ""
-    print(f"[LLM Output] {llm_output}")
-    try:
-        # 使用正则表达式进行不区分大小写的匹配
-        # re.DOTALL 标志让 '.' 可以匹配换行符，这对于多行的 detail/position 至关重要
-        detail_match = re.search(r"detail:\s*(.*)", llm_output, re.IGNORECASE | re.DOTALL)
-        position_match = re.search(r"position:\s*(.*)", llm_output, re.IGNORECASE | re.DOTALL)
+    def _try_load_json(s: str) -> dict | None:
+        if not s:
+            return None
+        s = re.sub(r",\s*}", "}", s)
+        s = re.sub(r",\s*]", "]", s)
+        if "'" in s and '"' not in s:
+            s = s.replace("'", '"')
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+        return None
 
-        # 提取匹配到的内容，并移除首尾的空白字符
-        # 如果没有匹配到，则使用默认值
-        detail = detail_match.group(1).strip() if detail_match else default_detail
-        position = position_match.group(1).strip() if position_match else default_position
-        
-        # 进一步处理：有时 position 可能会被 detail 的多行内容捕获，我们需要切分它
-        if detail_match and position_match and detail.find("position:") != -1:
-             detail = detail.split("position:")[0].strip()
+    desc = sty = bp = ""
+    if not isinstance(llm_output, str) or not llm_output.strip():
+        return {"description": desc, "style": sty, "base_prompt": bp}
 
-        return detail, position
+    raw = llm_output.strip()
+    json_blk = _extract_json_block(raw)
+    if json_blk:
+        obj = _try_load_json(json_blk)
+        if obj is not None:
+            desc = _clean_val(obj.get("description", ""))
+            sty  = _clean_val(obj.get("style", ""))
+            bp   = _clean_val(obj.get("base_prompt", ""))
+            return {"description": desc, "style": sty, "base_prompt": bp}
 
-    except Exception as e:
-        print(f"[Parser Error] Failed to parse LLM output: {e}")
-        return default_detail, default_position
+    m_desc = re.search(r"(?i)\bdescription\s*:\s*(.+)", raw)
+    m_style = re.search(r"(?i)\bstyle\s*:\s*(.+)", raw)
+    m_base = re.search(r"(?i)\bbase[_\s-]?prompt\s*:\s*(.+)", raw)
+
+    def _slice_until_next_key(s: str) -> str:
+        if not s:
+            return ""
+        s = re.split(r"(?i)\b(?:description|style|base[_\s-]?prompt)\s*:", s)[0]
+        s = s.strip().rstrip(",;")
+        return s
+
+    if m_desc:
+        desc = _clean_val(_slice_until_next_key(m_desc.group(1)))
+    if m_style:
+        sty = _clean_val(_slice_until_next_key(m_style.group(1)))
+    if m_base:
+        bp = _clean_val(_slice_until_next_key(m_base.group(1)))
+
+    return {"description": desc, "style": sty, "base_prompt": bp}
 
 
-
-# 将这个新函数添加到你的 utils_image.py 文件中，可以放在其他辅助函数旁边
 def clean_text(text: str) -> str:
-    """
-    清理文本字符串，移除所有标点符号并将所有字符转换为小写。
-
-    Args:
-        text (str): 输入的字符串。
-
-    Returns:
-        str: 清理和格式化后的字符串。
-    """
-    if not isinstance(text, str):
-        return ""
-        
-    # 步骤 1: 将所有字符转换为小写
+    if not isinstance(text, str): return ""
     text = text.lower()
-    
-    # 步骤 2: 移除所有标点符号
-    # string.punctuation 包含了一系列常见的标点符号
-    # str.translate() 是一个高效移除多个字符的方法
-    translator = str.maketrans('', '', string.punctuation)
-    text = text.translate(translator)
-    
-    return text
+    text = text.replace('\n', ' ').replace('\r', '').replace('[', '').replace(']', '')
+    return text.strip()
 
 def local_vl_request(system_prompt: str, user_prompt: str, image_path: str, PROCESSOR, VL_MODEL, args):
     """
@@ -353,31 +509,22 @@ def local_vl_request(system_prompt: str, user_prompt: str, image_path: str, PROC
     """
     try:
         image = Image.open(image_path).convert("RGB")
-        
         messages = [
-            {   
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                    },
-                    {"type": "text", "text": user_prompt},
-                ],
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "image",},
+                {"type": "text", "text": user_prompt},
+            ]},
         ]
         text = PROCESSOR.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = PROCESSOR(text=text, images=image, return_tensors="pt").to(VL_MODEL.device)
-
         with torch.no_grad():
-            output = VL_MODEL.generate(**inputs, do_sample=True, top_p=1.0, top_k=50, temperature=1.0, repetition_penalty=1.05, max_new_tokens=50)
-        
+            output = VL_MODEL.generate(
+                **inputs,
+                do_sample=True, top_p=1.0, top_k=50, temperature=1.0,
+                repetition_penalty=1.05, max_new_tokens=200
+            )
         response_text = PROCESSOR.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        
-        # Clean the response to only get the newly generated part.
         cleaned_response = response_text.split("assistant")[-1].strip()
         return cleaned_response
     except Exception as e:
