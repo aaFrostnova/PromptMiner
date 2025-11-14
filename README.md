@@ -33,13 +33,13 @@ python data/data.py
 
 ```bash
 # set the paths in run.sh
-TARGET_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/sdxl-turbo"
+TARGET_MODEL_PATH="path to your model"
 
-RECORD_DIR="/home/mingzhel_umass_edu/Modifier_fuzz/logs_structured_mcts_fuzzer_sdxl_mscoco"
+RECORD_DIR="path for Phase II results"
 
-IMAGE_MODEL_PATH="/project/pi_shiqingma_umass_edu/mingzheli/model/Qwen2-VL-2B-Instruct"
+IMAGE_MODEL_PATH="path to Qwen2-vl"
 
-WORK_DIR="./results_sdxl_mscoco"
+WORK_DIR="path for Phase I results"
 
 # run the script
 bash run.sh
