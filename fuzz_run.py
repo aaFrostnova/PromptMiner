@@ -6,7 +6,7 @@ import random
 import openai
 import json 
 import os   
-from Modifier_fuzz.fuzzer_core import ImagePromptFuzzer
+from fuzzer_core import ImagePromptFuzzer
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from PIL import Image
 import PIL
