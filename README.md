@@ -1,6 +1,6 @@
 # PromptMiner
 
-Our paper, *PROMPTMINER: Black-Box Prompt Stealing against Text-to-Image Generative Models via Reinforcement Learning and Fuzz Optimization*, has been accepted to CVPR 2026.
+🎉 Our paper, [*PROMPTMINER: Black-Box Prompt Stealing against Text-to-Image Generative Models via Reinforcement Learning and Fuzz Optimization*](https://arxiv.org/abs/2511.22119), has been accepted to **CVPR 2026**!
 
 PromptMiner has two stages:
 
