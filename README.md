@@ -1,5 +1,7 @@
 # PromptMiner
 
+Our paper, *PROMPTMINER: Black-Box Prompt Stealing against Text-to-Image Generative Models via Reinforcement Learning and Fuzz Optimization*, has been accepted to CVPR 2026.
+
 PromptMiner has two stages:
 
 1. `train_imm_blip.py`: Phase I (imitation learning + RL with BLIP + PPO) to generate a base prompt and save it to `best_prompts.json`
