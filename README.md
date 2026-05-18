@@ -140,3 +140,16 @@ Before running it directly, make sure the expected directory structure and resul
 ```bash
 python eval.py
 ```
+
+## 📌Citation
+
+If you find this repo helpful, please kindly cite the paper:
+
+```bibtex
+@article{li2025promptminer,
+  title={PROMPTMINER: Black-Box Prompt Stealing against Text-to-Image Generative Models via Reinforcement Learning and Fuzz Optimization},
+  author={Li, Mingzhe and Zhang, Renhao and Wen, Zhiyang and Pan, Siqi and da Silva, Bruno Castro and Zhai, Juan and Ma, Shiqing},
+  journal={arXiv preprint arXiv:2511.22119},
+  year={2025}
+}
+
